@@ -84,15 +84,25 @@ void OrderBook::AddOrder(Order& order){
     MatchOrder(order);
 
     if(order.getOrderQuantity() > 0){
-        if(order.getOrderType() == Type::Buy){
-            buys_[order.getOrderPrice()].levelQueue.push_back(order);
-            buys_[order.getOrderPrice()].totalQuantity += order.getOrderQuantity();
-            orderMap_[order.getOrderId()] = {order.getOrderPrice(), order.getOrderType()};
+        Price orderPrice = order.getOrderPrice();
+        OrderId id = order.getOrderId();
+
+    if(order.getOrderType() == Type::Buy){
+            auto& level = buys_[orderPrice];
+            level.levelQueue.push_back(order);
+            level.totalQuantity += order.getOrderQuantity();
+
+            auto it = std::prev(level.levelQueue.end());
+            orderMap_[id] = {orderPrice, Type::Buy, it};
         }
-        else{
-            asks_[order.getOrderPrice()].levelQueue.push_back(order);
-            asks_[order.getOrderPrice()].totalQuantity += order.getOrderQuantity();
-            orderMap_[order.getOrderId()] = {order.getOrderPrice(), order.getOrderType()};
+    
+    else{
+            auto& level = asks_[orderPrice];
+            level.levelQueue.push_back(order);
+            level.totalQuantity += order.getOrderQuantity();
+
+            auto it = std::prev(level.levelQueue.end());
+            orderMap_[id] = {orderPrice, Type::Sell, it};
         }
     }
 }
@@ -105,49 +115,31 @@ void OrderBook::CancelOrder(OrderId orderId){
         return;
     }
 
-    auto& [price,orderType] = lookup->second;
+    auto& details = lookup->second;
 
-    if(orderType == Type::Buy){
-        auto level = buys_.find(price);
+    if(details.type == Type::Buy){
+        auto level = buys_.find(details.price);
 
-        if(level == buys_.end()){
-            return ;
-        }
-        
-        auto& queue = level->second.levelQueue;
-
-        for(auto it = queue.begin(); it!=queue.end(); ++it){
-            if(it->getOrderId()== orderId){
-                level->second.totalQuantity -= it->getOrderQuantity();
-                queue.erase(it);
-                break;
+        if(level != buys_.end()){
+            level->second.totalQuantity -= details.it->getOrderQuantity();
+            level->second.levelQueue.erase(details.it);
+            
+            if(level->second.levelQueue.empty()){
+                buys_.erase(level);
             }
         }
-        if(queue.empty()){
-            buys_.erase(level);
-        }
-
     }
     else{
-        auto level = asks_.find(price);
+        auto level = asks_.find(details.price);
 
-        if(level == asks_.end()){
-            return;
-        }
+        if(level!= asks_.end()){
+            level->second.totalQuantity -= details.it->getOrderQuantity();
+            level->second.levelQueue.erase(details.it);
 
-        auto& queue = level->second.levelQueue;
-
-        for(auto it = queue.begin(); it!= queue.end(); ++it){
-            if(it->getOrderId() == orderId){
-                level->second.totalQuantity -= it->getOrderQuantity();
-                queue.erase(it);
-                break;
+            if(level->second.levelQueue.empty()){
+                asks_.erase(level);
             }
         }
-        if(queue.empty()){
-            asks_.erase(level);
-        }
-
     }
     orderMap_.erase(lookup);
 }

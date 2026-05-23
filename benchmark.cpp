@@ -24,13 +24,13 @@ std::vector<Order> generateMockOrders(int count, OrderId startId) {
 }
 
 int main() {
-    const int ORDER_COUNT = 100000; // 100,000 orders
-    std::cout << "Pre-generating " << ORDER_COUNT << " mock orders...\n";
+    const int ORDER_COUNT = 1000000; // 1,000,000 orders
+    //std::cout << "Pre-generating " << ORDER_COUNT << " mock orders...\n";
     auto orders = generateMockOrders(ORDER_COUNT, 1);
 
     OrderBook book;
 
-    std::cout << "Starting OrderBook Add/Match Benchmark...\n";
+    //std::cout << "Starting OrderBook Add/Match Benchmark...\n";
     
     // --- 1. Benchmark Order Addition & Matching ---
     auto startMatch = std::chrono::high_resolution_clock::now();
@@ -46,7 +46,7 @@ int main() {
     // --- 2. Benchmark Cancellation Performance ---
     // Try to cancel the first 20k orders submitted (some might already be fully filled)
     const int CANCEL_COUNT = 20000;
-    std::cout << "Starting OrderBook Cancellation Benchmark (" << CANCEL_COUNT << " operations)...\n";
+    //std::cout << "Starting OrderBook Cancellation Benchmark (" << CANCEL_COUNT << " operations)...\n";
     
     auto startCancel = std::chrono::high_resolution_clock::now();
     
