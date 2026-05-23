@@ -79,3 +79,20 @@ void OrderBook::MatchOrder(Order& order){
         }
     }
 }
+
+void OrderBook::AddOrder(Order& order){
+    MatchOrder(order);
+
+    if(order.getOrderQuantity() > 0){
+        if(order.getOrderType() == Type::Buy){
+            buys_[order.getOrderPrice()].levelQueue.push_back(order);
+            buys_[order.getOrderPrice()].totalQuantity += order.getOrderQuantity();
+            orderMap_[order.getOrderId()] = {order.getOrderPrice(), order.getOrderType()};
+        }
+        else{
+            asks_[order.getOrderPrice()].levelQueue.push_back(order);
+            asks_[order.getOrderPrice()].totalQuantity += order.getOrderQuantity();
+            orderMap_[order.getOrderId()] = {order.getOrderPrice(), order.getOrderType()};
+        }
+    }
+}
