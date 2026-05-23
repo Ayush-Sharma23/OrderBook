@@ -96,3 +96,58 @@ void OrderBook::AddOrder(Order& order){
         }
     }
 }
+
+void OrderBook::CancelOrder(OrderId orderId){
+    auto lookup = orderMap_.find(orderId);
+
+    if(lookup == orderMap_.end()){
+        //std::cout<<"Order Not Found!\n";
+        return;
+    }
+
+    auto& [price,orderType] = lookup->second;
+
+    if(orderType == Type::Buy){
+        auto level = buys_.find(price);
+
+        if(level == buys_.end()){
+            return ;
+        }
+        
+        auto& queue = level->second.levelQueue;
+
+        for(auto it = queue.begin(); it!=queue.end(); ++it){
+            if(it->getOrderId()== orderId){
+                level->second.totalQuantity -= it->getOrderQuantity();
+                queue.erase(it);
+                break;
+            }
+        }
+        if(queue.empty()){
+            buys_.erase(level);
+        }
+
+    }
+    else{
+        auto level = asks_.find(price);
+
+        if(level == asks_.end()){
+            return;
+        }
+
+        auto& queue = level->second.levelQueue;
+
+        for(auto it = queue.begin(); it!= queue.end(); ++it){
+            if(it->getOrderId() == orderId){
+                level->second.totalQuantity -= it->getOrderQuantity();
+                queue.erase(it);
+                break;
+            }
+        }
+        if(queue.empty()){
+            asks_.erase(level);
+        }
+
+    }
+    orderMap_.erase(lookup);
+}
