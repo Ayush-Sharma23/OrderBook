@@ -3,9 +3,13 @@
 
 class OrderBook{
     private:
-        std::map<Price, PriceLevel, std::greater<Price>> buys_;
-        std::map<Price,PriceLevel> asks_;
-    
+   
+        std::vector<PriceLevel> buys_;
+        std::vector<PriceLevel> asks_;
+
+        int bestBidIdx_;
+        int bestAskIdx_;
+
         using ListIterator = std::list<Order>::iterator;
 
         struct orderDetail{
@@ -17,7 +21,8 @@ class OrderBook{
         std::unordered_map<OrderId,orderDetail> orderMap_;
     
     public:
-        bool validateOrder(Order order);
+        OrderBook();
+        bool validateOrder(const Order order);
         void MatchOrder(Order& order);
         void CancelOrder(OrderId orderId);
         void AddOrder(Order& order);

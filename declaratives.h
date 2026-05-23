@@ -11,5 +11,9 @@ enum Type{
     Sell
 };
 
+const Price MIN_PRICE = 1;
+const Price MAX_PRICE = 1000;
+const size_t ARRAY_SIZE = MAX_PRICE - MIN_PRICE + 1;
+
 #endif
 
