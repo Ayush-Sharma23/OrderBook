@@ -1,77 +1,71 @@
-#include <iostream>
+#include "OrderBook.h"
+#include "SPSCQueue.h"
+#include <thread>
 #include <chrono>
 #include <vector>
-#include <random>
-#include "OrderBook.h"
+#include <pthread.h>
+#include <sched.h>
 
-// Generates an explicit list of random orders before timing starts
-std::vector<Order> generateMockOrders(int count, OrderId startId) {
-    std::vector<Order> orders;
-    orders.reserve(count);
+const size_t BENCHMARK_COUNT = 1'000'000;
+SPSCQueue orderQueue(65536); // Power of 2 ring buffer capacity
+OrderBook ob;
+std::atomic<bool> producerFinished{false};
 
-    // Using a fixed seed ensures your benchmark runs are deterministic and reproducible
-    std::mt19937 rng(42); 
-    std::uniform_int_distribution<Price> priceDist(95, 105);      // Stock price swinging between 95 and 105
-    std::uniform_int_distribution<Quantity> qtyDist(10, 500);     // Quantities between 10 and 500
-    std::uniform_int_distribution<int> typeDist(0, 1);            // 0 = Buy, 1 = Sell
+void pin_thread(int core_id) {
+    cpu_set_t cpuset;
+    CPU_ZERO(&cpuset);
+    CPU_SET(core_id, &cpuset);
+    pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset);
+}
 
-    for (int i = 0; i < count; ++i) {
-        Type type = (typeDist(rng) == 0) ? Type::Buy : Type::Sell;
-        orders.emplace_back(startId + i, priceDist(rng), qtyDist(rng), type);
+// Thread 1: Simulates Network Ingestion
+void producer_thread() {
+    pin_thread(1); // Pin Producer to Core 1
+    
+    for (size_t i = 0; i < BENCHMARK_COUNT; ++i) {
+        Order order(i, 500 + (i % 10), 100, (i % 2 == 0) ? Type::Buy : Type::Sell);
+        // Spin-wait if the lock-free queue temporarily fills up
+        while (!orderQueue.push(order)) {
+            std::this_thread::yield();
+        }
     }
+    producerFinished.store(true);
+}
 
-    return orders;
+// Thread 2: Dedicated Core Matching Engine
+void consumer_thread() {
+    pin_thread(2); // Pin Matching Engine to Core 2
+    
+    Order incomingOrder(0, 0, 0, Type::Buy);
+    while (true) {
+        if (orderQueue.pop(incomingOrder)) {
+            ob.AddOrder(incomingOrder);
+        } else if (producerFinished.load()) {
+            // Check one last time to drain queue
+            if (!orderQueue.pop(incomingOrder)) break;
+            ob.AddOrder(incomingOrder);
+        }
+    }
 }
 
 int main() {
-    const int ORDER_COUNT = 1000000; // 1,000,000 orders
-    //std::cout << "Pre-generating " << ORDER_COUNT << " mock orders...\n";
-    auto orders = generateMockOrders(ORDER_COUNT, 1);
-
-    OrderBook book;
-
-    //std::cout << "Starting OrderBook Add/Match Benchmark...\n";
+//    std::cout << "Starting Lock-Free Asynchronous Matching Engine Benchmark...\n";
     
-    // --- 1. Benchmark Order Addition & Matching ---
-    auto startMatch = std::chrono::high_resolution_clock::now();
+    auto start = std::chrono::high_resolution_clock::now();
     
-    for (int i = 0; i < ORDER_COUNT; ++i) {
-        // We use AddOrder since it processes matching first, then saves remainder
-        book.AddOrder(orders[i]); 
-    }
-
-    auto endMatch = std::chrono::high_resolution_clock::now();
-    std::chrono::duration<double, std::milli> matchDuration = endMatch - startMatch;
-
-    // --- 2. Benchmark Cancellation Performance ---
-    // Try to cancel the first 20k orders submitted (some might already be fully filled)
-    const int CANCEL_COUNT = 20000;
-    //std::cout << "Starting OrderBook Cancellation Benchmark (" << CANCEL_COUNT << " operations)...\n";
+    std::thread t1(producer_thread);
+    std::thread t2(consumer_thread);
     
-    auto startCancel = std::chrono::high_resolution_clock::now();
+    t1.join();
+    t2.join();
     
-    for (int i = 0; i < CANCEL_COUNT; ++i) {
-        book.CancelOrder(orders[i].getOrderId());
-    }
-
-    auto endCancel = std::chrono::high_resolution_clock::now();
-    std::chrono::duration<double, std::milli> cancelDuration = endCancel - startCancel;
-
-    // --- Performance Metrics Printout ---
-    double matchSeconds = matchDuration.count() / 1000.0;
-    double cancelSeconds = cancelDuration.count() / 1000.0;
-
-    std::cout << "\n================= BENCHMARK PERFORMANCE RESULTS =================\n";
-    std::cout << "Add & Match Operations:\n";
-    std::cout << "  Total Execution Time : " << matchDuration.count() << " ms\n";
-    std::cout << "  Throughput           : " << (ORDER_COUNT / matchSeconds) << " orders/sec\n";
-    std::cout << "  Avg Latency          : " << (matchDuration.count() * 1000.0 / ORDER_COUNT) << " microseconds/order\n\n";
-
-    std::cout << "Cancel Operations:\n";
-    std::cout << "  Total Execution Time : " << cancelDuration.count() << " ms\n";
-    std::cout << "  Throughput           : " << (CANCEL_COUNT / cancelSeconds) << " cancels/sec\n";
-    std::cout << "  Avg Latency          : " << (cancelDuration.count() * 1000.0 / CANCEL_COUNT) << " microseconds/cancel\n";
-    std::cout << "=================================================================\n";
-
+    auto end = std::chrono::high_resolution_clock::now();
+    std::chrono::duration<double, std::milli> elapsed = end - start;
+    
+    std::cout << "==================================================\n";
+    std::cout << "Multi-Threaded Execution Time: " << elapsed.count() << " ms\n";
+    std::cout << "Throughput: " << (BENCHMARK_COUNT / (elapsed.count() / 1000.0)) << " orders/sec\n";
+    std::cout << "==================================================\n";
+    
     return 0;
 }

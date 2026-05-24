@@ -32,7 +32,7 @@ void OrderBook::deallocateNode(PoolIdx idx) {
 bool OrderBook::validateOrder(const Order& order) {
     OrderId id = order.getOrderId();
     if (id < 0 || id >= (int)MAX_ORDER_IDS || orderIdToPoolIdx_[id] != INVALID_IDX) return false;
-    if (order.getOrderQuantity() <= 0) return false;
+    if (order.getOrderQuantity() <= 0) [[unlikely]] return false;
     
     Price p = order.getOrderPrice();
     return (p >= MIN_PRICE && p <= MAX_PRICE);
@@ -183,10 +183,10 @@ void OrderBook::AddOrder(Order& order) {
 }
 
 void OrderBook::CancelOrder(OrderId orderId) {
-    if (orderId < 0 || orderId >= (int)MAX_ORDER_IDS) return;
+    if (orderId < 0 || orderId >= (int)MAX_ORDER_IDS) [[unlikely]] return;
     
     PoolIdx currIdx = orderIdToPoolIdx_[orderId];
-    if (currIdx == INVALID_IDX) return; 
+    if (currIdx == INVALID_IDX) [[unlikely]] return; 
 
     PoolOrder& target = orderPool_[currIdx];
     size_t idx = target.price - MIN_PRICE;
