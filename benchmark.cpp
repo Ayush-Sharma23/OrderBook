@@ -1,71 +1,265 @@
 #include "OrderBook.h"
 #include "SPSCQueue.h"
-#include <thread>
-#include <chrono>
+#include "Protocol.h"
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <iostream>
 #include <vector>
+#include <cstring>
+#include <thread>
+#include <atomic>
+#include <chrono>
+#include <memory>
 #include <pthread.h>
 #include <sched.h>
 
-const size_t BENCHMARK_COUNT = 1'000'000;
-SPSCQueue orderQueue(65536); // Power of 2 ring buffer capacity
-OrderBook ob;
-std::atomic<bool> producerFinished{false};
+// Configuration Constants
+const size_t TOTAL_BENCHMARK_ORDERS = 2'000'000; // 2 Million operations test suite
+const size_t RING_BUFFER_CAPACITY = 262144;      // Pre-allocated lock-free ring slots
+const int PORT_GATEWAY = 9999;
 
-void pin_thread(int core_id) {
+// Heap pointers to guarantee clean unmounting before application exit boundaries
+std::unique_ptr<SPSCQueue> orderQueue;
+std::unique_ptr<OrderBook> ob;
+
+// Multi-threaded synchronization primitives
+std::atomic<bool> networkRunning{true};
+std::atomic<bool> clientFinished{false};
+
+// Enforces Hardware Core Affinity
+void pin_thread_to_core(int core_id) {
     cpu_set_t cpuset;
     CPU_ZERO(&cpuset);
     CPU_SET(core_id, &cpuset);
     pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset);
 }
 
-// Thread 1: Simulates Network Ingestion
-void producer_thread() {
-    pin_thread(1); // Pin Producer to Core 1
-    
-    for (size_t i = 0; i < BENCHMARK_COUNT; ++i) {
-        Order order(i, 500 + (i % 10), 100, (i % 2 == 0) ? Type::Buy : Type::Sell);
-        // Spin-wait if the lock-free queue temporarily fills up
-        while (!orderQueue.push(order)) {
-            std::this_thread::yield();
-        }
-    }
-    producerFinished.store(true);
+// Configures socket descriptors to operate without synchronous blocking stalls
+void make_socket_non_blocking(int fd) {
+    int flags = fcntl(fd, F_GETFL, 0);
+    fcntl(fd, F_SETFL, flags | O_NONBLOCK);
 }
 
-// Thread 2: Dedicated Core Matching Engine
-void consumer_thread() {
-    pin_thread(2); // Pin Matching Engine to Core 2
+// =================================================================
+// 1. HIGH-SPEED NATIVE BENCHMARKING CLIENT (Core 0)
+// =================================================================
+void native_benchmark_client_thread() {
+    pin_thread_to_core(0); // Lock client to Core 0
+    std::this_thread::sleep_for(std::chrono::milliseconds(500)); // Allow server to bind
+
+    int client_fd = socket(AF_INET, SOCK_STREAM, 0);
+    sockaddr_in serv_addr{};
+    serv_addr.sin_family = AF_INET;
+    serv_addr.sin_port = htons(PORT_GATEWAY);
+    inet_pton(AF_INET, "127.0.0.1", &serv_addr.sin_addr);
+
+    if (connect(client_fd, (struct sockaddr*)&serv_addr, sizeof(serv_addr)) < 0) {
+        std::cerr << "[Client Error] Connection to local matching engine failed.\n";
+        return;
+    }
+
+    // Pre-allocate a contiguous memory arena to avoid hot-loop allocations
+    std::vector<uint8_t> transmitBuffer;
+    size_t packetSize = sizeof(PacketHeader) + sizeof(WireNewOrder);
+    transmitBuffer.resize(TOTAL_BENCHMARK_ORDERS * packetSize);
+
+    size_t offset = 0;
+    for (size_t i = 0; i < TOTAL_BENCHMARK_ORDERS; ++i) {
+        PacketHeader* header = reinterpret_cast<PacketHeader*>(&transmitBuffer[offset]);
+        header->type = MsgType::NewOrder;
+        header->length = sizeof(WireNewOrder);
+
+        WireNewOrder* wireOrd = reinterpret_cast<WireNewOrder*>(&transmitBuffer[offset + sizeof(PacketHeader)]);
+        wireOrd->orderId = static_cast<int32_t>(i);
+        wireOrd->price = static_cast<int32_t>(500 + (i % 10));
+        wireOrd->quantity = 100;
+        wireOrd->side = (i % 2 == 0) ? 0 : 1; // Alternating Buy/Sell to trigger instant matches
+
+        offset += packetSize;
+    }
+
+   // std::cout << "[Client] Memory arena loaded with " << TOTAL_BENCHMARK_ORDERS << " binary orders. Commencing blast...\n";
     
-    Order incomingOrder(0, 0, 0, Type::Buy);
+    size_t totalBytesToWrite = transmitBuffer.size();
+    size_t bytesWrittenSoFar = 0;
+    
+    while (bytesWrittenSoFar < totalBytesToWrite) {
+        ssize_t chunk = write(client_fd, transmitBuffer.data() + bytesWrittenSoFar, totalBytesToWrite - bytesWrittenSoFar);
+        if (chunk > 0) {
+            bytesWrittenSoFar += chunk;
+        }
+    }
+
+    //std::cout << "[Client] Data blast completed successfully.\n";
+    clientFinished.store(true);
+    close(client_fd);
+}
+
+// =================================================================
+// 2. STATIC-ARENA NETWORK INGESTION ENGINE (Core 1)
+// =================================================================
+void live_network_ingestion_thread() {
+    pin_thread_to_core(1); // Lock Ingestion to Core 1
+    
+    int server_fd = socket(AF_INET, SOCK_STREAM, 0);
+    int opt = 1;
+    setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+    
+    sockaddr_in address{};
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = INADDR_ANY;
+    address.sin_port = htons(PORT_GATEWAY);
+    
+    bind(server_fd, (struct sockaddr*)&address, sizeof(address));
+    listen(server_fd, 5);
+    make_socket_non_blocking(server_fd);
+    
+    int client_fd = -1;
+    
+    // Low-latency alternative to std::vector. Fixed heap buffer to stop reallocations
+    const size_t ARENA_SIZE = 256 * 1024; 
+    uint8_t* inboundArena = new uint8_t[ARENA_SIZE];
+    size_t writeOffset = 0;
+    size_t readOffset = 0;
+
+    while (networkRunning.load()) {
+        if (client_fd == -1) {
+            socklen_t addrlen = sizeof(address);
+            client_fd = accept(server_fd, (struct sockaddr*)&address, &addrlen);
+            if (client_fd != -1) {
+                make_socket_non_blocking(client_fd);
+            } else {
+                if (clientFinished.load()) break;
+                std::this_thread::yield();
+                continue;
+            }
+        }
+
+        ssize_t bytesRead = read(client_fd, inboundArena + writeOffset, ARENA_SIZE - writeOffset);
+        
+        if (bytesRead > 0) {
+            writeOffset += bytesRead;
+        } else if (bytesRead == 0 || (bytesRead < 0 && errno != EAGAIN && errno != EWOULDBLOCK)) {
+            close(client_fd);
+            client_fd = -1;
+            writeOffset = 0;
+            readOffset = 0;
+            break;
+        }
+
+        // Parse zero-copy representations straight out of the byte stream arena
+        while ((writeOffset - readOffset) >= sizeof(PacketHeader)) {
+            PacketHeader* header = reinterpret_cast<PacketHeader*>(inboundArena + readOffset);
+            size_t totalMessageSize = sizeof(PacketHeader) + header->length;
+
+            if ((writeOffset - readOffset) < totalMessageSize) {
+                break;
+            }
+
+            size_t payloadOffset = readOffset + sizeof(PacketHeader);
+            if (header->type == MsgType::NewOrder) {
+                WireNewOrder* wireOrd = reinterpret_cast<WireNewOrder*>(inboundArena + payloadOffset);
+                Order ord(wireOrd->orderId, wireOrd->price, wireOrd->quantity, (wireOrd->side == 0) ? Type::Buy : Type::Sell);
+                
+                // Spin-push to the SPSC communications layer
+                while (!orderQueue->push(ord)) [[unlikely]] { 
+                    std::this_thread::yield(); 
+                }
+            }
+            
+            readOffset += totalMessageSize;
+        }
+
+        // Shift remaining fragmentary bytes to the front of the block arena
+        size_t unparsedBytes = writeOffset - readOffset;
+        if (unparsedBytes > 0 && readOffset > 0) {
+            std::memmove(inboundArena, inboundArena + readOffset, unparsedBytes);
+            writeOffset = unparsedBytes;
+            readOffset = 0;
+        } else if (unparsedBytes == 0) {
+            writeOffset = 0;
+            readOffset = 0;
+        }
+    }
+
+    if (client_fd != -1) close(client_fd);
+    close(server_fd);
+    
+    delete[] inboundArena; // Deallocate safely upon normal thread termination context
+}
+
+// =================================================================
+// 3. TELEMETRY MATCHING ENGINE CORE (Core 2)
+// =================================================================
+void dedicated_matching_engine_thread() {
+    pin_thread_to_core(2); // Lock Matching Engine to Core 2
+    
+    Order incomingOrder;
+    size_t handledOrders = 0;
+    
+    std::chrono::high_resolution_clock::time_point start_time;
+    bool timer_started = false;
+
     while (true) {
-        if (orderQueue.pop(incomingOrder)) {
-            ob.AddOrder(incomingOrder);
-        } else if (producerFinished.load()) {
-            // Check one last time to drain queue
-            if (!orderQueue.pop(incomingOrder)) break;
-            ob.AddOrder(incomingOrder);
+        if (orderQueue->pop(incomingOrder)) {
+            if (!timer_started) {
+                start_time = std::chrono::high_resolution_clock::now();
+                timer_started = true;
+            }
+
+            if (incomingOrder.getOrderQuantity() > 0) [[likely]] {
+                ob->AddOrder(incomingOrder);
+            } else {
+                ob->CancelOrder(incomingOrder.getOrderId());
+            }
+            
+            handledOrders++;
+            
+            if (handledOrders == TOTAL_BENCHMARK_ORDERS) {
+                auto end_time = std::chrono::high_resolution_clock::now();
+                std::chrono::duration<double, std::milli> elapsed = end_time - start_time;
+                
+                std::cout << "\n================= PRODUCTION SERVER BENCHMARK =================\n";
+                std::cout << " Add & Match Operations (Over Live Network Loopback Link):\n";
+                std::cout << "  Total Processed Count : " << handledOrders << " orders\n";
+                std::cout << "  Total Execution Time  : " << elapsed.count() << " ms\n";
+                std::cout << "  Engine Throughput     : " << (handledOrders / (elapsed.count() / 1000.0)) << " orders/sec\n";
+                std::cout << "  Avg Network+Match Latency: " << (elapsed.count() * 1000.0 / handledOrders) << " microseconds/order\n";
+                std::cout << "===============================================================\n";
+                
+                networkRunning.store(false); // Signal ingestion framework loop to shut down
+                break;
+            }
         }
     }
 }
 
+// =================================================================
+// 4. COORDINATION LIFECYCLE CONTROLLER
+// =================================================================
 int main() {
-//    std::cout << "Starting Lock-Free Asynchronous Matching Engine Benchmark...\n";
+   // std::cout << "Spawning Micro-Architectural Benchmarking Environment...\n";
     
-    auto start = std::chrono::high_resolution_clock::now();
+    // Heap-allocate pointers to gain direct control over structural lifetimes
+    orderQueue = std::make_unique<SPSCQueue>(RING_BUFFER_CAPACITY);
+    ob = std::make_unique<OrderBook>();
     
-    std::thread t1(producer_thread);
-    std::thread t2(consumer_thread);
+    std::thread serverNetThread(live_network_ingestion_thread);
+    std::thread serverMatchThread(dedicated_matching_engine_thread);
+    std::thread clientDriverThread(native_benchmark_client_thread);
     
-    t1.join();
-    t2.join();
+    // Synchronous execution checkpoint unmounting sequence
+    clientDriverThread.join();
+    serverNetThread.join();   
+    serverMatchThread.join(); 
     
-    auto end = std::chrono::high_resolution_clock::now();
-    std::chrono::duration<double, std::milli> elapsed = end - start;
+   // std::cout << "[System] Explicitly releasing core memory structures...\n";
+    orderQueue.reset();
+    ob.reset();
     
-    std::cout << "==================================================\n";
-    std::cout << "Multi-Threaded Execution Time: " << elapsed.count() << " ms\n";
-    std::cout << "Throughput: " << (BENCHMARK_COUNT / (elapsed.count() / 1000.0)) << " orders/sec\n";
-    std::cout << "==================================================\n";
-    
+   // std::cout << "[System] All execution structures cleanly unmounted. Exit successful.\n";
     return 0;
 }
