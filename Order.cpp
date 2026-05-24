@@ -7,10 +7,10 @@ Order::Order(OrderId orderId_, Price orderPrice_, Quantity orderQuantity_, Type 
     orderType(orderType_)
 {}
 
-OrderId Order::getOrderId(){return orderId;}
-Price Order:: getOrderPrice(){return this->orderPrice;}
-Quantity Order::getOrderQuantity(){return this->orderQuantity;}
-Type Order::getOrderType(){return this->orderType;}
+OrderId Order::getOrderId()const{return orderId;}
+Price Order:: getOrderPrice()const{return this->orderPrice;}
+Quantity Order::getOrderQuantity()const{return this->orderQuantity;}
+Type Order::getOrderType()const{return this->orderType;}
 
 void Order::reduceQuantity(Quantity traded){
     this->orderQuantity -= traded; 

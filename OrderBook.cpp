@@ -1,145 +1,221 @@
 #include "OrderBook.h"
 
-bool OrderBook::validateOrder(Order order){
-    if(orderMap_.find(order.getOrderId()) != orderMap_.end()){
-        return false;
+OrderBook::OrderBook() :
+    buys_(ARRAY_SIZE),
+    asks_(ARRAY_SIZE),
+    orderPool_(MAX_ORDERS),
+    freeList_(MAX_ORDERS),
+    freeListTop_(MAX_ORDERS),
+    orderIdToPoolIdx_(MAX_ORDER_IDS, INVALID_IDX),
+    bestBidIdx_(-1),
+    bestAskIdx_(ARRAY_SIZE)
+{
+    for(size_t i = 0; i < ARRAY_SIZE; ++i) {
+        buys_[i].levelPrice = MIN_PRICE + i;
+        asks_[i].levelPrice = MIN_PRICE + i;
     }
-    if(order.getOrderQuantity() <= 0){
-        return false;
+
+    for(size_t i = 0; i < MAX_ORDERS; ++i) {
+        freeList_[i] = (MAX_ORDERS - 1) - i;
     }
-    return true;
 }
 
-void OrderBook::MatchOrder(Order& order){
-    if(!validateOrder(order)){
-        std::cerr<<"Invalid Order\n";
-        return;
+PoolIdx OrderBook::allocateNode() {
+    if (freeListTop_ == 0) return INVALID_IDX; // Pool Exceeded
+    return freeList_[--freeListTop_];
+}
+
+void OrderBook::deallocateNode(PoolIdx idx) {
+    freeList_[freeListTop_++] = idx;
+}
+
+bool OrderBook::validateOrder(const Order& order) {
+    OrderId id = order.getOrderId();
+    if (id < 0 || id >= (int)MAX_ORDER_IDS || orderIdToPoolIdx_[id] != INVALID_IDX) return false;
+    if (order.getOrderQuantity() <= 0) return false;
+    
+    Price p = order.getOrderPrice();
+    return (p >= MIN_PRICE && p <= MAX_PRICE);
+}
+
+void OrderBook::intrusiveAppend(PriceLevel& level, PoolIdx newIdx) {
+    if (level.tail_idx == INVALID_IDX) {
+        level.head_idx = newIdx;
+        level.tail_idx = newIdx;
+        orderPool_[newIdx].prev_idx = INVALID_IDX;
+        orderPool_[newIdx].next_idx = INVALID_IDX;
+    } else {
+        PoolIdx oldTail = level.tail_idx;
+        orderPool_[oldTail].next_idx = newIdx;
+        orderPool_[newIdx].prev_idx = oldTail;
+        orderPool_[newIdx].next_idx = INVALID_IDX;
+        level.tail_idx = newIdx;
+    }
+}
+
+void OrderBook::intrusiveErase(PriceLevel& level, PoolIdx currIdx) {
+    PoolIdx pIdx = orderPool_[currIdx].prev_idx;
+    PoolIdx nIdx = orderPool_[currIdx].next_idx;
+
+    if (currIdx == level.head_idx) {
+        level.head_idx = nIdx;
+    } else {
+        orderPool_[pIdx].next_idx = nIdx;
     }
 
-    if(order.getOrderType() == Type::Buy){
-       while(!asks_.empty() && order.getOrderQuantity()>0){
-        
-        auto bestAsk_ = asks_.begin();
-        Price bestAskPrice_ = bestAsk_->first;
-
-        if(order.getOrderPrice() < bestAskPrice_){
-            break;
-        }
-        
-        auto& lqueue = bestAsk_->second.levelQueue;
-        
-        while(!lqueue.empty() && order.getOrderQuantity()>0){
-            Order& resting = lqueue.front();
-
-            Quantity traded = std::min(order.getOrderQuantity(), resting.getOrderQuantity());
-            order.reduceQuantity(traded);
-            resting.reduceQuantity(traded);
-            bestAsk_->second.totalQuantity-=traded;
-
-            if(resting.getOrderQuantity()==0){
-                orderMap_.erase(resting.getOrderId());
-                lqueue.pop_front();
-            }
-        }
-        if(lqueue.empty()){
-            asks_.erase(bestAsk_);
-        }
-       } 
+    if (currIdx == level.tail_idx) {
+        level.tail_idx = pIdx;
+    } else {
+        orderPool_[nIdx].prev_idx = pIdx;
     }
-    else{
-        while(!buys_.empty() && order.getOrderQuantity() >0){
+}
+
+void OrderBook::MatchOrder(Order& order) {
+    if (order.getOrderType() == Type::Buy) {
+        while (bestAskIdx_ < (int)ARRAY_SIZE && (MIN_PRICE + bestAskIdx_) <= order.getOrderPrice() && order.getOrderQuantity() > 0) {
+            auto& level = asks_[bestAskIdx_];
             
-            auto bestBuy_ = buys_.begin();
-            Price bestBuyPrice_ = bestBuy_->first;
+            while (level.head_idx != INVALID_IDX && order.getOrderQuantity() > 0) {
+                PoolIdx restingIdx = level.head_idx;
+                PoolOrder& resting = orderPool_[restingIdx];
 
-            if(order.getOrderPrice() > bestBuyPrice_){
-                return;
-            }
-
-            auto& lqueue = bestBuy_->second.levelQueue;
-
-            while(!lqueue.empty() && order.getOrderQuantity()>0){
-                Order& resting  = lqueue.front();
-
-                Quantity traded = std::min(order.getOrderQuantity(), resting.getOrderQuantity());
-
+                Quantity traded = std::min(order.getOrderQuantity(), resting.qty);
                 order.reduceQuantity(traded);
-                resting.reduceQuantity(traded);
-                bestBuy_->second.totalQuantity -= traded;
+                resting.qty -= traded;
+                level.totalQuantity -= traded;
 
-                if(resting.getOrderQuantity() == 0){
-                    orderMap_.erase(resting.getOrderId());
-                    lqueue.pop_front();
+                if (resting.qty == 0) {
+                    orderIdToPoolIdx_[resting.id] = INVALID_IDX;
+                    
+                    level.head_idx = resting.next_idx;
+                    if (level.head_idx == INVALID_IDX) {
+                        level.tail_idx = INVALID_IDX;
+                    } else {
+                        orderPool_[level.head_idx].prev_idx = INVALID_IDX;
+                    }
+                    
+                    deallocateNode(restingIdx);
                 }
             }
-            if(lqueue.empty()){
-                buys_.erase(bestBuy_);
+
+            if (level.head_idx == INVALID_IDX) {
+                bestAskIdx_++;
+                while (bestAskIdx_ < (int)ARRAY_SIZE && asks_[bestAskIdx_].head_idx == INVALID_IDX) {
+                    bestAskIdx_++;
+                }
+            }
+        }
+    } 
+    else {
+        while (bestBidIdx_ >= 0 && (MIN_PRICE + bestBidIdx_) >= order.getOrderPrice() && order.getOrderQuantity() > 0) {
+            auto& level = buys_[bestBidIdx_];
+
+            while (level.head_idx != INVALID_IDX && order.getOrderQuantity() > 0) {
+                PoolIdx restingIdx = level.head_idx;
+                PoolOrder& resting = orderPool_[restingIdx];
+
+                Quantity traded = std::min(order.getOrderQuantity(), resting.qty);
+                order.reduceQuantity(traded);
+                resting.qty -= traded;
+                level.totalQuantity -= traded;
+
+                if (resting.qty == 0) {
+                    orderIdToPoolIdx_[resting.id] = INVALID_IDX;
+
+                    level.head_idx = resting.next_idx;
+                    if (level.head_idx == INVALID_IDX) {
+                        level.tail_idx = INVALID_IDX;
+                    } else {
+                        orderPool_[level.head_idx].prev_idx = INVALID_IDX;
+                    }
+
+                    deallocateNode(restingIdx);
+                }
             }
 
+            if (level.head_idx == INVALID_IDX) {
+                bestBidIdx_--;
+                while (bestBidIdx_ >= 0 && buys_[bestBidIdx_].head_idx == INVALID_IDX) {
+                    bestBidIdx_--;
+                }
+            }
         }
     }
 }
 
-void OrderBook::AddOrder(Order& order){
+void OrderBook::AddOrder(Order& order) {
     MatchOrder(order);
 
-    if(order.getOrderQuantity() > 0){
+    if (order.getOrderQuantity() > 0) {
         Price orderPrice = order.getOrderPrice();
+        size_t idx = orderPrice - MIN_PRICE;
         OrderId id = order.getOrderId();
 
-    if(order.getOrderType() == Type::Buy){
-            auto& level = buys_[orderPrice];
-            level.levelQueue.push_back(order);
+        PoolIdx newIdx = allocateNode();
+        if (newIdx == INVALID_IDX) return; 
+
+        orderPool_[newIdx].id = id;
+        orderPool_[newIdx].price = orderPrice;
+        orderPool_[newIdx].qty = order.getOrderQuantity();
+        orderPool_[newIdx].type = order.getOrderType();
+
+        orderIdToPoolIdx_[id] = newIdx;
+
+        if (order.getOrderType() == Type::Buy) {
+            auto& level = buys_[idx];
+            intrusiveAppend(level, newIdx);
             level.totalQuantity += order.getOrderQuantity();
 
-            auto it = std::prev(level.levelQueue.end());
-            orderMap_[id] = {orderPrice, Type::Buy, it};
-        }
-    
-    else{
-            auto& level = asks_[orderPrice];
-            level.levelQueue.push_back(order);
+            if ((int)idx > bestBidIdx_) {
+                bestBidIdx_ = idx;
+            }
+        } 
+        else { 
+            auto& level = asks_[idx];
+            intrusiveAppend(level, newIdx);
             level.totalQuantity += order.getOrderQuantity();
 
-            auto it = std::prev(level.levelQueue.end());
-            orderMap_[id] = {orderPrice, Type::Sell, it};
+            if ((int)idx < bestAskIdx_) {
+                bestAskIdx_ = idx;
+            }
         }
     }
 }
 
-void OrderBook::CancelOrder(OrderId orderId){
-    auto lookup = orderMap_.find(orderId);
+void OrderBook::CancelOrder(OrderId orderId) {
+    if (orderId < 0 || orderId >= (int)MAX_ORDER_IDS) return;
+    
+    PoolIdx currIdx = orderIdToPoolIdx_[orderId];
+    if (currIdx == INVALID_IDX) return; 
 
-    if(lookup == orderMap_.end()){
-        //std::cout<<"Order Not Found!\n";
-        return;
-    }
+    PoolOrder& target = orderPool_[currIdx];
+    size_t idx = target.price - MIN_PRICE;
 
-    auto& details = lookup->second;
+    if (target.type == Type::Buy) {
+        auto& level = buys_[idx];
+        level.totalQuantity -= target.qty;
+        intrusiveErase(level, currIdx);
 
-    if(details.type == Type::Buy){
-        auto level = buys_.find(details.price);
+        if (level.head_idx == INVALID_IDX && (int)idx == bestBidIdx_) {
+            bestBidIdx_--;
+            while (bestBidIdx_ >= 0 && buys_[bestBidIdx_].head_idx == INVALID_IDX) {
+                bestBidIdx_--;
+            }
+        }
+    } 
+    else { 
+        auto& level = asks_[idx];
+        level.totalQuantity -= target.qty;
+        intrusiveErase(level, currIdx);
 
-        if(level != buys_.end()){
-            level->second.totalQuantity -= details.it->getOrderQuantity();
-            level->second.levelQueue.erase(details.it);
-            
-            if(level->second.levelQueue.empty()){
-                buys_.erase(level);
+        if (level.head_idx == INVALID_IDX && (int)idx == bestAskIdx_) {
+            bestAskIdx_++;
+            while (bestAskIdx_ < (int)ARRAY_SIZE && asks_[bestAskIdx_].head_idx == INVALID_IDX) {
+                bestAskIdx_++;
             }
         }
     }
-    else{
-        auto level = asks_.find(details.price);
 
-        if(level!= asks_.end()){
-            level->second.totalQuantity -= details.it->getOrderQuantity();
-            level->second.levelQueue.erase(details.it);
-
-            if(level->second.levelQueue.empty()){
-                asks_.erase(level);
-            }
-        }
-    }
-    orderMap_.erase(lookup);
+    orderIdToPoolIdx_[orderId] = INVALID_IDX;
+    deallocateNode(currIdx);
 }

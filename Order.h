@@ -12,10 +12,10 @@ private:
     Type orderType;
 public:
     Order(OrderId,Price,Quantity,Type);
-    OrderId getOrderId();
-    Price getOrderPrice();
-    Quantity getOrderQuantity();
-    Type getOrderType();
+    OrderId getOrderId() const;
+    Price getOrderPrice()const;
+    Quantity getOrderQuantity()const;
+    Type getOrderType()const;
     void reduceQuantity(Quantity);
 };
 
