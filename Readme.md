@@ -16,7 +16,7 @@ The architecture isolates runtime operations across distinct, hardware-pinned CP
 * Core 2: Core Matching Engine execution thread (Drives FIFO priority matching)
 
 Communication between the ingestion pipeline and execution pipeline is handled via a custom single-producer single-consumer(SPSC) lock-free ring buffer. This isolates the core matching engine from network jitter and OS disruptions, maintaining predictable execution characteristics.
-
+```text
 [ HARDWARE ISOLATION BOUNDARY ]
                                   
  ┌───────────────────────────┐      Local TCP Loopback      ┌───────────────────────────────────┐
@@ -60,7 +60,7 @@ Communication between the ingestion pipeline and execution pipeline is handled v
                                                             └───────────────────────────────────┘
 
 
-
+```
 ## Setup and Prerequisites
 
 ### Operating System 
