@@ -61,6 +61,27 @@ Communication between the ingestion pipeline and execution pipeline is handled v
 
 
 ```
+## Core Matching Engine (`OrderBook`)
+
+The core execution layer implements a deterministic, ultra-low-latency Limit Order Book (LOB) designed around price-time priority ($O(1)$ matching complexity). Traditional order books suffer from performance degradation due to pointer-chasing in linked lists or balance adjustments in tree structures (e.g., `std::map`). This architecture eliminates those bottlenecks by utilizing flat, cache-aligned contiguous memory arrays and indexed memory pools.
+
+
+
+### Key Architectural Features
+
+* **Constant-Time Level Lookup:** Price levels are mapped directly to array offsets or flat buckets. This converts typical $O(\log N)$ search paths into instant $O(1)$ direct index access, ensuring execution speeds remain stable regardless of order book depth.
+* **Intra-Core Cache Locality:** Bids and asks are separated into independent, continuous memory structures. By tightly packing active order properties (price, quantity, order ID) and eliminating heap allocations during mutations, data fits perfectly inside the CPU's local L1/L2 data caches.
+* **Zero-Allocation Internal Memory Pool:** To prevent memory fragmentation and operating system pauses during peak execution intervals, individual order nodes are stored inside a pre-allocated structural arena (`MemoryPool`). When an order is added, modified, or canceled, the engine recycles index blocks inline without invoking system memory management.
+
+### Data Structures and Layout Boundaries
+
+The internal memory parameters are defined inside `declaratives.h` to allocate adequate static memory for high-volume execution datasets:
+
+```cpp
+const size_t MAX_ORDERS = 2005000;      // Maximum active tracking capacity across the execution arena
+const size_t MAX_ORDER_IDS = 2005000;   // Inbound index array boundary constraint
+```
+
 ## Setup and Prerequisites
 
 ### Operating System 
