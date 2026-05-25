@@ -122,4 +122,29 @@ The benchmark should appear like this -
 ===============================================================
 ```
 
+Performance Benchmark - 
+```bash 
+ perf stat -e cycles,instructions,cache-misses ./orderbook_bench
+```
+Results should look like this- 
+```text 
+================= PRODUCTION SERVER BENCHMARK =================
+ Add & Match Operations (Over Live Network Loopback Link):
+  Total Processed Count : 2000000 orders
+  Total Execution Time  : 96.2921 ms
+  Engine Throughput     : 2.07701e+07 orders/sec
+  Avg Network+Match Latency: 0.0481461 microseconds/order
+===============================================================
 
+ Performance counter stats for './orderbook_bench':
+
+     1,763,236,613      cycles:u                                                              
+     3,550,407,726      instructions:u                                                        
+         1,275,553      cache-misses:u                                                        
+
+       0.678657050 seconds time elapsed
+
+       0.772009000 seconds user
+       0.538656000 seconds sys
+
+```
