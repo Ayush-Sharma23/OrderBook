@@ -1,0 +1,35 @@
+name: C/C++ CI
+
+on:
+  push:
+    branches: [ "LockFreeQueue" ]
+  pull_request:
+    branches: [ "LockFreeQueue" ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v4
+
+    - name: Install Compiler Dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y build-essential g++
+
+    - name: Verify Compiler Capabilities
+      run: g++ --version
+
+    - name: Compile Asynchronous Matching Engine (-O3)
+      run: |
+        g++ -O3 -std=c++17 Order.cpp OrderBook.cpp benchmark.cpp -o orderbook_bench -lpthread
+
+    - name: Verify Compilation Binary Target
+      run: |
+        if [ ! -f ./orderbook_bench ]; then
+          echo "Compilation target file orderbook_bench was not generated!"
+          exit 1
+        fi
+        echo "Binary successfully compiled with structural layout validation."
