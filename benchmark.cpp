@@ -18,7 +18,7 @@
 
 // Configuration Constants
 const size_t TOTAL_BENCHMARK_ORDERS = 2'000'000; // 2 Million operations test suite
-const size_t RING_BUFFER_CAPACITY = 262144;      // Pre-allocated lock-free ring slots
+const size_t RING_BUFFER_CAPACITY = 262144;      // Pre-allocated lock-free ring slots (Must be Power of 2)
 const int PORT_GATEWAY = 9999;
 
 // Heap pointers to guarantee clean unmounting before application exit boundaries
@@ -43,11 +43,20 @@ void make_socket_non_blocking(int fd) {
     fcntl(fd, F_SETFL, flags | O_NONBLOCK);
 }
 
+// Inline hardware-level micro-stall to mitigate Infinity Fabric thrashing
+inline void cpu_relax() {
+#if defined(__x86_64__) || defined(_M_X64)
+    __builtin_ia32_pause();
+#else
+    std::this_thread::yield();
+#endif
+}
+
 // =================================================================
-// 1. HIGH-SPEED NATIVE BENCHMARKING CLIENT (Core 0)
+// 1. HIGH-SPEED NATIVE BENCHMARKING CLIENT (Core 0 -> Logical 0)
 // =================================================================
 void native_benchmark_client_thread() {
-    pin_thread_to_core(0); // Lock client to Core 0
+    pin_thread_to_core(0); // Lock client to Physical Core 0
     std::this_thread::sleep_for(std::chrono::milliseconds(500)); // Allow server to bind
 
     int client_fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -80,8 +89,6 @@ void native_benchmark_client_thread() {
 
         offset += packetSize;
     }
-
-   // std::cout << "[Client] Memory arena loaded with " << TOTAL_BENCHMARK_ORDERS << " binary orders. Commencing blast...\n";
     
     size_t totalBytesToWrite = transmitBuffer.size();
     size_t bytesWrittenSoFar = 0;
@@ -93,16 +100,15 @@ void native_benchmark_client_thread() {
         }
     }
 
-    //std::cout << "[Client] Data blast completed successfully.\n";
     clientFinished.store(true);
     close(client_fd);
 }
 
 // =================================================================
-// 2. STATIC-ARENA NETWORK INGESTION ENGINE (Core 1)
+// 2. STATIC-ARENA NETWORK INGESTION ENGINE (Core 1 -> Logical 2)
 // =================================================================
 void live_network_ingestion_thread() {
-    pin_thread_to_core(1); // Lock Ingestion to Core 1
+    pin_thread_to_core(2); // Lock Ingestion to Physical Core 1 (Logical 2)
     
     int server_fd = socket(AF_INET, SOCK_STREAM, 0);
     int opt = 1;
@@ -134,6 +140,7 @@ void live_network_ingestion_thread() {
             } else {
                 if (clientFinished.load()) break;
                 std::this_thread::yield();
+               // cpu_relax();
                 continue;
             }
         }
@@ -164,9 +171,9 @@ void live_network_ingestion_thread() {
                 WireNewOrder* wireOrd = reinterpret_cast<WireNewOrder*>(inboundArena + payloadOffset);
                 Order ord(wireOrd->orderId, wireOrd->price, wireOrd->quantity, (wireOrd->side == 0) ? Type::Buy : Type::Sell);
                 
-                // Spin-push to the SPSC communications layer
+                // Optimized spin-push utilizing hardware instruction stalls
                 while (!orderQueue->push(ord)) [[unlikely]] { 
-                    std::this_thread::yield(); 
+                    cpu_relax(); 
                 }
             }
             
@@ -188,14 +195,14 @@ void live_network_ingestion_thread() {
     if (client_fd != -1) close(client_fd);
     close(server_fd);
     
-    delete[] inboundArena; // Deallocate safely upon normal thread termination context
+    delete[] inboundArena;
 }
 
 // =================================================================
-// 3. TELEMETRY MATCHING ENGINE CORE (Core 2)
+// 3. TELEMETRY MATCHING ENGINE CORE (Core 2 -> Logical 4)
 // =================================================================
 void dedicated_matching_engine_thread() {
-    pin_thread_to_core(2); // Lock Matching Engine to Core 2
+    pin_thread_to_core(4); // Lock Matching Engine to Physical Core 2 (Logical 4)
     
     Order incomingOrder;
     size_t handledOrders = 0;
@@ -230,9 +237,12 @@ void dedicated_matching_engine_thread() {
                 std::cout << "  Avg Network+Match Latency: " << (elapsed.count() * 1000.0 / handledOrders) << " microseconds/order\n";
                 std::cout << "===============================================================\n";
                 
-                networkRunning.store(false); // Signal ingestion framework loop to shut down
+                networkRunning.store(false);
                 break;
             }
+        } else {
+            // Drop core instruction pressure when queue transitions to an empty state
+            cpu_relax();
         }
     }
 }
@@ -241,8 +251,6 @@ void dedicated_matching_engine_thread() {
 // 4. COORDINATION LIFECYCLE CONTROLLER
 // =================================================================
 int main() {
-   // std::cout << "Spawning Micro-Architectural Benchmarking Environment...\n";
-    
     // Heap-allocate pointers to gain direct control over structural lifetimes
     orderQueue = std::make_unique<SPSCQueue>(RING_BUFFER_CAPACITY);
     ob = std::make_unique<OrderBook>();
@@ -256,10 +264,8 @@ int main() {
     serverNetThread.join();   
     serverMatchThread.join(); 
     
-   // std::cout << "[System] Explicitly releasing core memory structures...\n";
     orderQueue.reset();
     ob.reset();
     
-   // std::cout << "[System] All execution structures cleanly unmounted. Exit successful.\n";
     return 0;
 }

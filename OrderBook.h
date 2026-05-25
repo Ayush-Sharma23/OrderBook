@@ -1,6 +1,7 @@
 #ifndef ORDERBOOK_H
 #define ORDERBOOK_H
 
+#include <vector>
 #include "Order.h"
 #include "PriceLevel.h"
 

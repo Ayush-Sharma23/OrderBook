@@ -1,13 +1,15 @@
 #ifndef DECL_H
 #define DECL_H
-#include <bits/stdc++.h>
 
-using Price = int;
-using Quantity = int;
-using OrderId = int;
+#include <cstdint>
+#include <cstddef>
+
+using Price = int32_t;
+using Quantity = int32_t;
+using OrderId = int32_t;
 using PoolIdx = uint32_t;
 
-enum Type{
+enum class Type: uint8_t{
     Buy,
     Sell
 };
