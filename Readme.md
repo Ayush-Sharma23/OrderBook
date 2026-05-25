@@ -3,7 +3,7 @@
 A high-frequency order matching engine built in C++17.
 The system uses a multi-threaded architecture to achieve sub-microsecond end-to-end processing latencies over Linux TCP stack.
 
-Throughput 22m+ messages/sec , average latency 40-45ns.
+Throughput upto 24m+ messages/sec , average latency 40-45ns.
 
 ## Project Description
 
