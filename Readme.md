@@ -104,6 +104,11 @@ sudo apt-get install build-essential gcc g++
  ```bash
 ./orderbook_bench
 ```
+#### Note : 
+execute the following script to run in elevated mode (Gives stable results)
+```bash
+sudo chrt -f 99 ./orderbook_bench
+```
 
 ### Benchmark
 The benchmark should appear like this -
