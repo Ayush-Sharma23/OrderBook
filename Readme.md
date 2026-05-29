@@ -1,4 +1,4 @@
-# Low-Latency Order Book 
+# Low-Latency Order Matching Engine 
 
 A high-frequency order matching engine built in C++17.
 The system uses a multi-threaded architecture to achieve sub-microsecond end-to-end processing latencies over Linux TCP stack.
